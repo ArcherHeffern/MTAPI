@@ -30,6 +30,3 @@ class DotEnvConfig:
             vals[field_name] = v
 
         return DotEnvConfig(**vals)  # type: ignore
-
-
-print(DotEnvConfig.load())

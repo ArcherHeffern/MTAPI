@@ -15,18 +15,17 @@ from typing import Optional
 
 from pydantic import BaseModel
 from src.env_loader import DotEnvConfig
-from google_maps_api.google_maps_api import GoogleMapsAPI
+from src.google_maps_api.google_maps_api import GoogleMapsService, TravelDelta
 from src.mtapi.mtapi import (
     Location,
     Mtapi,
     SerializedStation,
     Train,
-    distance as compute_distance,
 )
 import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = FastAPI()
 
@@ -83,8 +82,8 @@ class StationResponse(BaseModel):
 
 
 class StationWithDistanceResponse(StationResponse):
-    distance: float
-    walking_time: timedelta
+    distance_meters: int
+    walking_time_seconds: int
 
 
 class WrappedResponse[T: StationResponse](BaseModel):
@@ -92,9 +91,36 @@ class WrappedResponse[T: StationResponse](BaseModel):
     last_updated: datetime
 
 
+class CloseTrain(BaseModel):
+    route: str
+    logo_color: str
+    direction: str
+    final_stop: str
+    train_arrival_time: datetime
+    walking_distance_meters: int
+    walking_time_seconds: int
+    when_to_leave: datetime
+    status: str
+
+    @classmethod
+    def id(cls) -> str:
+        return f"{cls.route}:{cls.direction}"
+
+    @staticmethod
+    def create_status() -> str: ...
+
+
+class CloseTrains(BaseModel):
+    close_trains: dict[str, CloseTrain]
+    last_updated: datetime
+
+
 class RoutesResponse(BaseModel):
     routes: list[str]
     last_updated: datetime
+
+
+google_maps_service = GoogleMapsService(dotenv.GOOGLE_MAPS_API_KEY)
 
 
 @app.get("/")
@@ -109,17 +135,17 @@ def index():
 def by_location(lat: float, lng: float) -> WrappedResponse[StationWithDistanceResponse]:
     nearby_stations = mta.get_by_point((lat, lng), 5)
 
-    travel_coordinates: list[tuple[Location, Location]] = [
-        ((lat, lng), (station["lat"], station["lng"])) for station in nearby_stations
+    travel_destinations: list[Location] = [
+        (station["lat"], station["lng"]) for station in nearby_stations
     ]
 
     # Find walking time
-    walking_times: Optional[list[timedelta]] = GoogleMapsAPI(
-        dotenv.GOOGLE_MAPS_API_KEY
-    ).walking_times(travel_coordinates)
+    walking_times: list[TravelDelta | None] = google_maps_service.walking_times(
+        (lat, lng), travel_destinations
+    )
 
-    if not walking_times:
-        raise HTTPException(status_code=500, detail="Could not fetch walking times")
+    if not any(walking_times):
+        raise HTTPException(status_code=500, detail="Could not fetch any walking times")
 
     output: WrappedResponse[StationWithDistanceResponse] = (
         _wrap_station_data_with_last_updated_time(nearby_stations, (lat, lng), walking_times)  # type: ignore
@@ -128,6 +154,10 @@ def by_location(lat: float, lng: float) -> WrappedResponse[StationWithDistanceRe
     # TODO: Order by relevence
 
     return output
+
+
+@app.get("/by-location/renderable")
+def by_location_renderable(lat: float, lng: float) -> CloseTrains: ...
 
 
 @app.get("/by-route/{route}")
@@ -159,23 +189,29 @@ def routes() -> RoutesResponse:
 def _wrap_station_data_with_last_updated_time(
     data: list[SerializedStation],
     distance: Optional[Location] = None,
-    walking_times: Optional[list[timedelta]] = None,
+    walking_times: Optional[list[TravelDelta | None]] = None,
 ) -> WrappedResponse[StationResponse]:
     last_updated = data[0]["last_update"]
     station_responses: list[StationResponse] = []
     for i, d in enumerate(data):
         if distance and walking_times:
-            station_response = StationWithDistanceResponse(
-                distance=compute_distance(distance, (d["lat"], d["lng"])),
-                walking_time=walking_times[i],
-                **d,  # type: ignore
-            )
+            t = walking_times[i]
+            if t:
+                station_response = StationWithDistanceResponse(
+                    distance_meters=t.distance_meters,
+                    walking_time_seconds=t.duration.total_seconds(),
+                    **d,  # type: ignore
+                )
+            else:
+                station_response = None
         else:
             assert not distance and not walking_times
             station_response = StationResponse(
                 **d,  # type: ignore
             )
-        station_responses.append(station_response)
+
+        if station_response:
+            station_responses.append(station_response)
         if d["last_update"] > last_updated:
             last_updated = d["last_update"]
 
