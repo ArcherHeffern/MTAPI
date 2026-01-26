@@ -11,14 +11,22 @@ Expose the MTA's real-time subway feed as a json api
 
 from dataclasses import dataclass
 from pathlib import Path
-from mtapi.mtapi import Mtapi
-import json
-from datetime import datetime
-from functools import wraps, reduce
+from typing import Optional
+
+from pydantic import BaseModel
+from src.env_loader import DotEnvConfig
+from google_maps_api.google_maps_api import GoogleMapsAPI
+from src.mtapi.mtapi import (
+    Location,
+    Mtapi,
+    SerializedStation,
+    Train,
+    distance as compute_distance,
+)
 import logging
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -31,6 +39,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+dotenv = DotEnvConfig.load()
 
 
 @dataclass
@@ -53,19 +64,6 @@ if app.debug:
     )
 
 
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, o):
-        try:
-            if isinstance(o, datetime):
-                return o.isoformat()
-            iterable = iter(o)
-        except TypeError:
-            pass
-        else:
-            return list(iterable)
-        return json.JSONEncoder.default(self, o)
-
-
 mta = Mtapi(
     stations_file=config.stations_file,
     max_trains=config.max_trains,
@@ -75,26 +73,31 @@ mta = Mtapi(
 )
 
 
-def response_wrapper(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        resp = f(*args, **kwargs)
-
-        if not isinstance(resp, Response):
-            # custom JSON encoder; this is important
-            resp = Response(
-                response=json.dumps(resp, cls=CustomJSONEncoder),
-                status=200,
-                mimetype="application/json",
-            )
-
-        return resp
-
-    return decorated_function
+class StationResponse(BaseModel):
+    name: str
+    lat: float
+    lng: float
+    northbound_trains: list[Train]
+    southbound_trains: list[Train]
+    routes: set[str]
 
 
-@app.route("/")
-@response_wrapper
+class StationWithDistanceResponse(StationResponse):
+    distance: float
+    walking_time: timedelta
+
+
+class WrappedResponse[T: StationResponse](BaseModel):
+    data: list[T]
+    last_updated: datetime
+
+
+class RoutesResponse(BaseModel):
+    routes: list[str]
+    last_updated: datetime
+
+
+@app.get("/")
 def index():
     return {
         "title": "MTAPI",
@@ -103,66 +106,77 @@ def index():
 
 
 @app.get("/by-location")
-def by_location(lat: float, long: float):
-    data = mta.get_by_point((lat, long), 5)
-    return _make_envelope(data)
+def by_location(lat: float, lng: float) -> WrappedResponse[StationWithDistanceResponse]:
+    nearby_stations = mta.get_by_point((lat, lng), 5)
+
+    travel_coordinates: list[tuple[Location, Location]] = [
+        ((lat, lng), (station["lat"], station["lng"])) for station in nearby_stations
+    ]
+
+    # Find walking time
+    walking_times: Optional[list[timedelta]] = GoogleMapsAPI(
+        dotenv.GOOGLE_MAPS_API_KEY
+    ).walking_times(travel_coordinates)
+
+    if not walking_times:
+        raise HTTPException(status_code=500, detail="Could not fetch walking times")
+
+    output: WrappedResponse[StationWithDistanceResponse] = (
+        _wrap_station_data_with_last_updated_time(nearby_stations, (lat, lng), walking_times)  # type: ignore
+    )
+
+    # TODO: Order by relevence
+
+    return output
 
 
-@app.route("/by-route/<route>", methods=["GET"])
-@response_wrapper
-def by_route(route):
-
-    if route.islower():
-        return redirect(request.host_url + "by-route/" + route.upper(), code=301)
-
+@app.get("/by-route/{route}")
+def by_route(route: str) -> WrappedResponse[StationResponse]:
+    route = route.upper()
     try:
-        data = mta.get_by_route(route)
-        return _make_envelope(data)
-    except KeyError as e:
-        resp = Response(
-            response=json.dumps({"error": "Station not found"}),
-            status=404,
-            mimetype="application/json",
-        )
+        data = mta.get_stations_of_route(route)
+        return _wrap_station_data_with_last_updated_time(data)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Station not found")
 
 
-@app.route("/by-id/<id_string>", methods=["GET"])
-@response_wrapper
-def by_index(id_string):
-    ids = id_string.split(",")
+@app.get("/by-id/<id_string>")
+def by_index(ids: list[str]):
     try:
         data = mta.get_by_id(ids)
-        return _make_envelope(data)
-    except KeyError as e:
-        resp = Response(
-            response=json.dumps({"error": "Station not found"}),
-            status=404,
-            mimetype="application/json",
-        )
+        return _wrap_station_data_with_last_updated_time(data)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Station not found")
 
 
-@app.route("/routes", methods=["GET"])
-@response_wrapper
-def routes():
-    return {"data": sorted(mta.get_routes()), "updated": mta.last_update()}
+@app.get("/routes")
+def routes() -> RoutesResponse:
+    return RoutesResponse(
+        routes=sorted(mta.get_routes()), last_updated=mta.last_update()
+    )
 
 
-def _envelope_reduce(a, b):
-    if a["last_update"] and b["last_update"]:
-        return a if a["last_update"] < b["last_update"] else b
-    elif a["last_update"]:
-        return a
-    else:
-        return b
+def _wrap_station_data_with_last_updated_time(
+    data: list[SerializedStation],
+    distance: Optional[Location] = None,
+    walking_times: Optional[list[timedelta]] = None,
+) -> WrappedResponse[StationResponse]:
+    last_updated = data[0]["last_update"]
+    station_responses: list[StationResponse] = []
+    for i, d in enumerate(data):
+        if distance and walking_times:
+            station_response = StationWithDistanceResponse(
+                distance=compute_distance(distance, (d["lat"], d["lng"])),
+                walking_time=walking_times[i],
+                **d,  # type: ignore
+            )
+        else:
+            assert not distance and not walking_times
+            station_response = StationResponse(
+                **d,  # type: ignore
+            )
+        station_responses.append(station_response)
+        if d["last_update"] > last_updated:
+            last_updated = d["last_update"]
 
-
-def _make_envelope(data):
-    time = None
-    if data:
-        time = reduce(_envelope_reduce, data)["last_update"]
-
-    return {"data": data, "updated": time}
-
-
-if __name__ == "__main__":
-    app.run(use_reloader=False)
+    return WrappedResponse(data=station_responses, last_updated=last_updated)

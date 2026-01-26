@@ -11,6 +11,7 @@ dependencies = [
     "click==8.1.6",
     "configparser==4.0.2",
     "contextlib2==0.5.5",
+    "dotenv>=0.9.9",
     "fastapi[standard]>=0.115.14",
     "funcsigs==1.0.2",
     "importlib-metadata==6.8.0",
