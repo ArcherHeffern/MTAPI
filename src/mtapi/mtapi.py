@@ -186,7 +186,7 @@ class Mtapi(object):
                 if not trip.is_valid():
                     continue
 
-                direction: Literal["N", "S"] = trip.get_direction()[0]
+                direction: Literal["N", "S"] = trip.get_direction()
                 route_id: str = trip.get_route_id().upper()
 
                 for update in entity.trip_update.stop_time_update:
