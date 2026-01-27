@@ -25,7 +25,7 @@ from src.mtapi.mtapi import (
 import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -100,8 +100,7 @@ class CloseTrain(BaseModel):
     train_arrival_time: datetime
     walking_distance_meters: Optional[int]
     walking_time_seconds: Optional[float]
-    when_to_leave: datetime
-    status: str
+    when_to_leave: Optional[datetime]
 
     @classmethod
     def get_id(cls, route: str, direction: str) -> str:
@@ -169,35 +168,165 @@ TEAL = "#008EB7"
 MTA_BLUE = "#08179C"
 ISA_BLUE = "#0078C6"
 
-ROUTE_TO_COLOR_MAP = {
-    "A": BLUE,
-    "C": BLUE,
-    "E": BLUE,
-    "B": ORANGE,
-    "D": ORANGE,
-    "F": ORANGE,
-    "FS": ORANGE,
-    "M": ORANGE,
-    "G": LIGHT_GREEN,
-    "L": GREY,
-    "J": BROWN,
-    "Z": BROWN,
-    "N": YELLOW,
-    "Q": YELLOW,
-    "R": YELLOW,
-    "W": YELLOW,
-    "1": RED,
-    "2": RED,
-    "3": RED,
-    "4": DARK_GREEN,
-    "5": DARK_GREEN,
-    "6": DARK_GREEN,
-    "6S": DARK_GREEN,  # Not present
-    "7": PURPLE,
-    "7S": PURPLE,  # Not present
-    "T": TEAL,
-    "S": GREY,
+
+@dataclass(frozen=True)
+class Route:
+    color: str
+    final_northbound_stop: str
+    final_southbound_stop: str
+
+
+ROUTE_MAP: dict[str, Route] = {
+    # A/C/E (8 Av / Queens Blvd / Fulton)
+    "A": Route(
+        color=BLUE,
+        final_northbound_stop="Inwood-207 St",
+        final_southbound_stop="Far Rockaway-Mott Av",
+    ),
+    "C": Route(
+        color=BLUE, final_northbound_stop="168 St", final_southbound_stop="Euclid Av"
+    ),
+    "E": Route(
+        color=BLUE,
+        final_northbound_stop="Jamaica Center-Parsons/Archer",
+        final_southbound_stop="World Trade Center",
+    ),
+    # B/D/F/M (6 Av / Queens Blvd / Culver)
+    "B": Route(
+        color=ORANGE,
+        final_northbound_stop="Bedford Park Blvd",
+        final_southbound_stop="Brighton Beach",
+    ),
+    "D": Route(
+        color=ORANGE,
+        final_northbound_stop="Norwood-205 St",
+        final_southbound_stop="Coney Island-Stillwell Av",
+    ),
+    "F": Route(
+        color=ORANGE,
+        final_northbound_stop="Jamaica-179 St",
+        final_southbound_stop="Coney Island-Stillwell Av",
+    ),
+    "M": Route(
+        color=ORANGE,
+        final_northbound_stop="Forest Hills-71 Av",
+        final_southbound_stop="Middle Village-Metropolitan Av",
+    ),
+    # Shuttles
+    "FS": Route(
+        color=ORANGE,
+        final_northbound_stop="Franklin Av",
+        final_southbound_stop="Prospect Park",
+    ),
+    "S": Route(
+        color=GREY,
+        final_northbound_stop="Times Sq-42 St",
+        final_southbound_stop="Grand Central-42 St",
+    ),
+    # Crosstown / Canarsie
+    "G": Route(
+        color=LIGHT_GREEN,
+        final_northbound_stop="Court Sq",
+        final_southbound_stop="Church Av",
+    ),
+    "L": Route(
+        color=GREY,
+        final_northbound_stop="8 Av",
+        final_southbound_stop="Canarsie-Rockaway Pkwy",
+    ),
+    # J/Z (Nassau / Jamaica)
+    "J": Route(
+        color=BROWN,
+        final_northbound_stop="Jamaica Center-Parsons/Archer",
+        final_southbound_stop="Broad St",
+    ),
+    "Z": Route(
+        color=BROWN,
+        final_northbound_stop="Jamaica Center-Parsons/Archer",
+        final_southbound_stop="Broad St",
+    ),
+    # N/Q/R/W (Broadway)
+    "N": Route(
+        color=YELLOW,
+        final_northbound_stop="Astoria-Ditmars Blvd",
+        final_southbound_stop="Coney Island-Stillwell Av",
+    ),
+    "Q": Route(
+        color=YELLOW,
+        final_northbound_stop="96 St",
+        final_southbound_stop="Coney Island-Stillwell Av",
+    ),
+    "R": Route(
+        color=YELLOW,
+        final_northbound_stop="Forest Hills-71 Av",
+        final_southbound_stop="Bay Ridge-95 St",
+    ),
+    "W": Route(
+        color=YELLOW,
+        final_northbound_stop="Astoria-Ditmars Blvd",
+        final_southbound_stop="Whitehall St-South Ferry",
+    ),
+    # 1/2/3 (7 Av)
+    "1": Route(
+        color=RED,
+        final_northbound_stop="Van Cortlandt Park-242 St",
+        final_southbound_stop="South Ferry",
+    ),
+    "2": Route(
+        color=RED,
+        final_northbound_stop="Wakefield-241 St",
+        final_southbound_stop="Flatbush Av-Brooklyn College",
+    ),
+    "3": Route(
+        color=RED,
+        final_northbound_stop="Harlem-148 St",
+        final_southbound_stop="New Lots Av",
+    ),
+    # 4/5/6 (Lexington)
+    "4": Route(
+        color=DARK_GREEN,
+        final_northbound_stop="Woodlawn",
+        final_southbound_stop="Crown Heights-Utica Av",
+    ),
+    "5": Route(
+        color=DARK_GREEN,
+        final_northbound_stop="Eastchester-Dyre Av",
+        final_southbound_stop="Flatbush Av-Brooklyn College",
+    ),
+    "6": Route(
+        color=DARK_GREEN,
+        final_northbound_stop="Pelham Bay Park",
+        final_southbound_stop="Brooklyn Bridge-City Hall",
+    ),
+    # Express variants (if you still want them keyed explicitly)
+    "6S": Route(
+        color=DARK_GREEN,
+        final_northbound_stop="Pelham Bay Park",
+        final_southbound_stop="Brooklyn Bridge-City Hall",
+    ),
+    "7": Route(
+        color=PURPLE,
+        final_northbound_stop="Flushing-Main St",
+        final_southbound_stop="34 St-Hudson Yards",
+    ),
+    "7S": Route(
+        color=PURPLE,
+        final_northbound_stop="Flushing-Main St",
+        final_southbound_stop="34 St-Hudson Yards",
+    ),
+    # T (planned / future)
+    "T": Route(
+        color=TEAL,
+        final_northbound_stop="Broadway & Houston St (Phase 3)",
+        final_southbound_stop="Hanover Sq (Phase 4)",
+    ),
 }
+
+
+def compute_when_to_leave(
+    train_arrival_time: datetime, walking_time_seconds: float
+) -> datetime:
+    return train_arrival_time - timedelta(walking_time_seconds)
 
 
 @app.get("/by-location/renderable")
@@ -224,34 +353,40 @@ def by_location_renderable(lat: float, lng: float) -> CloseTrains:
             ("S", nearby_station["southbound_trains"][0]),
         ]:
             route = train["name"]
-            if route not in ROUTE_TO_COLOR_MAP:
+            if route not in ROUTE_MAP:
                 raise HTTPException(
                     500, f"Route '{train["name"]}' not found in ROUTE_TO_COLOR_MAP"
                 )
-            route_color = ROUTE_TO_COLOR_MAP[route]
+            route_data = ROUTE_MAP[route]
+            route_color = route_data.color
 
-            route_stations = mta.get_stations_of_route(route)
-            final_stop = route_stations[0] if direction == "N" else route_stations[-1]
+            final_stop = (
+                route_data.final_northbound_stop
+                if direction == "N"
+                else route_data.final_southbound_stop
+            )
             walking_time = walking_times[station_index]
-
-            when_to_leave = datetime.now()  # TODO
-            status = ""  # TODO
+            if walking_time:
+                walking_time_seconds = walking_time.duration.total_seconds()
+                when_to_leave = compute_when_to_leave(
+                    train["time"], walking_time_seconds
+                )
+            else:
+                walking_time_seconds = None
+                when_to_leave = None
 
             close_train = CloseTrain(
                 id=CloseTrain.get_id(route, direction),
                 route=route,
                 route_color=route_color,
                 direction=direction,
-                final_stop=final_stop["name"],
+                final_stop=final_stop,
                 train_arrival_time=train["time"],
                 walking_distance_meters=(
                     walking_time.distance_meters if walking_time else None
                 ),
-                walking_time_seconds=(
-                    walking_time.duration.total_seconds() if walking_time else None
-                ),
+                walking_time_seconds=walking_time_seconds,
                 when_to_leave=when_to_leave,
-                status=status,
             )
             close_trains.append(close_train)
 
