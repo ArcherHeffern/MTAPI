@@ -180,22 +180,25 @@ class Mtapi(object):
 
             max_time = self._last_update + timedelta(minutes=self._MAX_MINUTES)
 
-            for entity in mta_data.entity:
+            for entity in mta_data.get_entity():
                 trip = Trip(entity)
 
                 if not trip.is_valid():
                     continue
 
-                direction: Literal["N", "S"] = trip.direction[0]
-                route_id: str = trip.route_id.upper()
+                direction: Literal["N", "S"] = trip.get_direction()[0]
+                route_id: str = trip.get_route_id().upper()
 
                 for update in entity.trip_update.stop_time_update:
                     trip_stop = TripStop(update)
 
-                    if trip_stop.time < self._last_update or trip_stop.time > max_time:
+                    if (
+                        trip_stop.get_time() < self._last_update
+                        or trip_stop.get_time() > max_time
+                    ):
                         continue
 
-                    stop_id: str = trip_stop.stop_id
+                    stop_id: str = trip_stop.get_stop_id()
 
                     if stop_id not in self._stops_to_stations:
                         logger.info("Stop %s not found", stop_id)
@@ -203,7 +206,10 @@ class Mtapi(object):
 
                     station_id = self._stops_to_stations[stop_id]
                     stations[station_id].add_train(
-                        route_id, direction, trip_stop.time, mta_data.timestamp
+                        route_id,
+                        direction,
+                        trip_stop.get_time(),
+                        mta_data.get_timestamp(),
                     )
 
                     routes[route_id].add(stop_id)
