@@ -13,24 +13,17 @@ This is part of a project to create a dashboard in Google Chrome's new tab page 
 - Added a new API route to tell a user when to leave to catch nearby trains by integrating with train times and google maps Distance Matrix API. 
 
 # Running the server
+## DotEnv
+1. Make a .env file using .env.sample for reference. 
+2. Create a GOOGLE_MAPS_API_KEY which has access to Google Maps Distance Matrix API
+
 ```bash
 uv run fastapi run --port 8002 # Prod
 uv run fastapi dev --port 8002 # Dev
 ```
 
-## DotEnv
-Make a .env file using .env.sample for reference. 
-Create a GOOGLE_MAPS_API_KEY which has access to Google Maps Distance Matrix API
-
 ## Generating a Stations File
 See the original repo for instructions
 
-## Projects
-
-Here are some projects that use MTAPI.
-
-* http://wheresthefuckingtrain.com
-
 ## License
-
 The project is made available under the MIT license.
